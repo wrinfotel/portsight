@@ -23,7 +23,7 @@ import signal
 import subprocess
 import sys
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # single seam for tests: point this at a fake tree to avoid touching the
 # real /proc (and accidentally killing things)
@@ -41,6 +41,75 @@ TCP_LISTEN = "0A"
 HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
 CONTAINER_ID_RE = re.compile(r"([0-9a-f]{64})")
 DOCKER_PREFIX_RE = re.compile(r"^docker-([0-9a-f]{64})\.scope$")
+DOCKER_PROXY_RE = re.compile(r"-container-ip (\S+) -container-port (\d+)")
+
+# lazily-built {container-ip: (short_id, name, image, via)} for docker-proxy
+_IP_MAP: dict | None = None
+
+
+def container_ip_map() -> dict:
+    """Map container IPs to container metadata via the docker/podman CLI.
+
+    docker-proxy is a host-side process: the container's cgroup is not in its
+    own /proc/PID/cgroup, so the port must be attributed through the
+    -container-ip argument from its cmdline instead.
+    """
+    global _IP_MAP
+    if _IP_MAP is not None:
+        return _IP_MAP
+    _IP_MAP = {}
+    for binary in ("docker", "podman"):
+        exe = shutil.which(binary)
+        if not exe:
+            continue
+        try:
+            out = subprocess.run([exe, "ps", "-q"], capture_output=True,
+                                 text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode != 0:
+            continue
+        ids = out.stdout.split()
+        if not ids:
+            continue
+        try:
+            out = subprocess.run(
+                [exe, "inspect", "--format",
+                 "{{range .NetworkSettings.Networks}}{{.IPAddress}},{{end}} {{.Name}} {{.Config.Image}}",
+                 *ids],
+                capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode != 0:
+            continue
+        for line in out.stdout.splitlines():
+            ip_field, _, rest = line.partition(" ")
+            if not rest:  # line had no metadata part (no networks at all)
+                continue
+            name, _, image = rest.partition(" ")
+            for ip in ip_field.rstrip(",").split(","):
+                if ip:
+                    _IP_MAP[ip] = {"name": name.lstrip("/"), "image": image,
+                                   "via": binary}
+        # one runtime is enough; keep the first that answered
+        if _IP_MAP:
+            break
+    return _IP_MAP
+
+
+def container_from_proxy_cmdline(cmdline: str) -> dict:
+    """docker-proxy keeps the target container-ip in its argv.
+
+    Returns {} unless both the ip is parseable and the runtime map resolves it.
+    """
+    m = DOCKER_PROXY_RE.search(cmdline or "")
+    if not m:
+        return {}
+    meta = container_ip_map().get(m.group(1))
+    if not meta:
+        return {}
+    return {"unit": "", "container": meta["name"], "image": meta["image"],
+            "runtime": meta["via"]}
 
 
 class PortsightError(Exception):
@@ -320,6 +389,15 @@ def owner_of(pid: int) -> dict:
         # in containers, /proc/1/cgroup path is often the real id even w/o CLI
         if not meta:
             owner["container"] = cid[:12]
+        return owner
+    # host-side proxy process: its own cgroup names docker.service, not the
+    # container it forwards to. Resolve through -container-ip in argv.
+    info = proc_info(pid)
+    if info.get("comm") == "docker-proxy":
+        proxy = container_from_proxy_cmdline(info.get("cmdline", ""))
+        if proxy:
+            proxy["unit"] = owner["unit"]
+            owner.update({k: v for k, v in proxy.items() if v})
     return owner
 
 

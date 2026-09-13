@@ -181,6 +181,60 @@ class ResolveTests(ProcTestCase):
         self.assertEqual(owner["container"], "a" * 12)  # falls back to short id
         self.assertEqual(owner["image"], "")            # no docker CLI in test env
 
+    def test_docker_proxy_attributed_via_container_ip(self):
+        # host-side docker-proxy: its cgroup says docker.service; the target
+        # container must come from -container-ip in argv + the runtime ip map
+        make_proc(self.tmp, {}, {
+            500: {"comm": "docker-proxy", "ppid": 830,
+                  "cgroup": "0::/system.slice/docker.service\n",
+                  "cmd": ["/usr/bin/docker-proxy", "-proto", "udp",
+                          "-host-ip", "0.0.0.0", "-host-port", "38341",
+                          "-container-ip", "172.29.172.2",
+                          "-container-port", "38341", "-use-listen-fd"]},
+        })
+        orig_map = portsight._IP_MAP
+        portsight._IP_MAP = {"172.29.172.2": {"name": "amnezia-awg",
+                                              "image": "amnezia-awg",
+                                              "via": "docker"}}
+        try:
+            owner = portsight.owner_of(500)
+        finally:
+            portsight._IP_MAP = orig_map
+        self.assertEqual(owner["container"], "amnezia-awg")
+        self.assertEqual(owner["image"], "amnezia-awg")
+        self.assertEqual(owner["runtime"], "docker")
+        self.assertEqual(owner["unit"], "docker.service")
+
+    def test_docker_proxy_unknown_ip_stays_plain(self):
+        make_proc(self.tmp, {}, {
+            501: {"comm": "docker-proxy", "ppid": 830,
+                  "cgroup": "0::/system.slice/docker.service\n",
+                  "cmd": ["docker-proxy", "-container-ip", "10.0.0.9",
+                          "-container-port", "53"]},
+        })
+        orig_map = portsight._IP_MAP
+        portsight._IP_MAP = {}  # runtime unreachable / empty
+        try:
+            owner = portsight.owner_of(501)
+        finally:
+            portsight._IP_MAP = orig_map
+        self.assertEqual(owner["container"], "")
+        self.assertEqual(owner["unit"], "docker.service")
+
+    def test_container_from_proxy_cmdline_negative(self):
+        portsight._IP_MAP_backup = getattr(portsight, "_IP_MAP_backup", None)
+        orig = portsight._IP_MAP
+        portsight._IP_MAP = {}
+        try:
+            # non-proxy process
+            self.assertEqual(portsight.container_from_proxy_cmdline(
+                "/usr/sbin/sshd -D"), {})
+            # proxy but ip unknown to runtime
+            self.assertEqual(portsight.container_from_proxy_cmdline(
+                "docker-proxy -container-ip 10.0.0.9 -container-port 53"), {})
+        finally:
+            portsight._IP_MAP = orig
+
     def test_udp(self):
         self._fixture()
         entries = portsight.resolve([53], "udp", False)
