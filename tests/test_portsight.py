@@ -295,7 +295,10 @@ class CliTests(ResolveTests):
         self._fixture()
         code, out, _ = self.run_cli(["--udp", "53", "--no-tree"])
         self.assertEqual(code, 1)
-        self.assertIn("udp LISTEN", out)
+        self.assertIn("127.0.0.53:53", out)
+        cells = out.splitlines()[1].split()
+        self.assertIn("udp", cells)
+        self.assertIn("LISTEN", cells)
 
     def test_summary_line(self):
         self._fixture()
@@ -308,6 +311,33 @@ class CliTests(ResolveTests):
         self.assertEqual((code, out), (1, ""))
         code, out, _ = self.run_cli(["44444", "--quiet"])
         self.assertEqual((code, out), (0, ""))
+
+    def test_table_header_and_alignment(self):
+        self._fixture()
+        _, out, _ = self.run_cli(["--no-tree", "--color", "never"])
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split(),
+                         ["PORT", "PROTO", "STATE", "PIDS", "OWNER"])
+        offsets = [lines[0].index(c) for c in
+                   ("PORT", "PROTO", "STATE", "PIDS", "OWNER")]
+        for row in lines[1:-1]:  # data rows (last line is the summary)
+            self.assertEqual(len(row), len(row.rstrip()), "row padded?")
+            for o in offsets:
+                # every column starts exactly at its header offset, preceded
+                # by spaces (column boundary)
+                self.assertNotEqual(row[o], " ",
+                                    f"cell not at offset {o}: {row!r}")
+                if o:
+                    self.assertEqual(row[o - 1], " ")
+
+    def test_color_alignment_still_plain_width(self):
+        self._fixture()
+        _, out_c, _ = self.run_cli(["--no-tree", "--color", "always"])
+        _, out_p, _ = self.run_cli(["--no-tree", "--color", "never"])
+        # strip ANSI: the two renderings must be identical
+        strip = __import__("re").compile(r"\033\[[0-9;]*m")
+        self.assertEqual([strip.sub("", l) for l in out_c.splitlines()],
+                         out_p.splitlines())
 
 
 # --------------------------------------------------------------------------- #

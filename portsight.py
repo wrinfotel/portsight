@@ -23,7 +23,7 @@ import signal
 import subprocess
 import sys
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 # single seam for tests: point this at a fake tree to avoid touching the
 # real /proc (and accidentally killing things)
@@ -126,6 +126,7 @@ class Palette:
         return f"\033[{code}m{text}\033[0m"
 
     def port(self, text): return self.wrap("1;36", text)
+    def bold(self, text): return self.wrap("1", text)
     def pid(self, text): return self.wrap("1", text)
     def unit(self, text): return self.wrap("35", text)
     def container(self, text): return self.wrap("38;5;75", text)
@@ -582,15 +583,40 @@ def render_tree(ent: dict, pal: Palette) -> str:
     return "\n".join(lines)
 
 
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def plain_len(s: str) -> int:
+    """Visible width of a possibly-colored string."""
+    return len(_ANSI_RE.sub("", s))
+
+
+COLUMNS = ("PORT", "PROTO", "STATE", "PIDS", "OWNER")
+
+
 def render(entries: list[dict], pal: Palette, show_tree: bool) -> str:
-    out = []
+    rows = []
     for ent in entries:
         head = fmt_bind(ent["addr"], ent["port"], ent["proto"])
-        line = (pal.port(head) + "  "
-                + pal.dim(ent["proto"] + " " + ent["state"]) + "  ")
-        pid_txt = ", ".join(f"{p['pid']}/{p['comm']}" for p in (ent.get("procs") or [])) or "?"
-        line += pal.pid(pid_txt) + "  " + owner_label(ent, pal)
-        out.append(line)
+        pid_txt = ", ".join(f"{p['pid']}/{p['comm']}"
+                            for p in (ent.get("procs") or [])) or "?"
+        rows.append([
+            pal.port(head),
+            pal.dim(ent["proto"]),
+            pal.dim(ent["state"]),
+            pal.pid(pid_txt),
+            owner_label(ent, pal),
+        ])
+    widths = [max(len(COLUMNS[i]), *(plain_len(r[i]) for r in rows))
+              for i in range(len(COLUMNS))] if rows else \
+             [len(c) for c in COLUMNS]
+    header = "  ".join(pal.bold(COLUMNS[i].ljust(widths[i]))
+                       for i in range(len(COLUMNS)))
+    out = [header]
+    for r, ent in zip(rows, entries):
+        line = "  ".join(cell.ljust(widths[i] + len(cell) - plain_len(cell))
+                         for i, cell in enumerate(r))
+        out.append(line.rstrip())
         if show_tree:
             out.append(render_tree(ent, pal))
     return "\n".join(out)

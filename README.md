@@ -6,8 +6,9 @@ Reads `/proc` directly on Linux. **No `lsof`, no `ss`, no `netstat` required** �
 
 ```
 $ portsight 22 --tree
-*:22  tcp LISTEN  1/systemd, 452960/sshd  unit:ssh.socket [socket-activated]  unit:ssh.service
-        452960 sshd (root) sshd: /usr/sbin/sshd -D [listener] 5 of 10-100 startups
+PORT   PROTO  STATE   PIDS                     OWNER
+*:22   tcp    LISTEN  1/systemd, 452960/sshd   unit:ssh.socket [socket-activated]  unit:ssh.service
+         452960 sshd (root) sshd: /usr/sbin/sshd -D [listener] 5 of 10-100 startups
 ```
 
 ## Why
@@ -59,14 +60,19 @@ portsight 8080 --json | jq '.[].owners[].container'
 ## What the columns mean
 
 ```
-[::]:8644  tcp6 LISTEN  468079/hermes  unit:hermes-gateway.service
-    │         │     │        │                │
-    │         │     │        │                └ cgroup attribution (systemd/docker)
-    │         │     │        └ pid/comm of every process holding the fd
-    │         │     └ state (UDP has no LISTEN; bound sockets show as LISTEN)
-    │         └ protocol + address family
-    └ bound address (* = wildcard)
+PORT         PROTO  STATE   PIDS           OWNER
+*:8644       tcp    LISTEN  468079/hermes  unit:hermes-gateway.service
+[::]:8644    tcp6   LISTEN  468079/hermes  unit:hermes-gateway.service
+127.0.0.53   udp    LISTEN  452948/systemd-resolve  unit:systemd-resolved.service
 ```
+
+| column | contents |
+|---|---|
+| **PORT** | bound address + port (`*:22` = wildcard; `[::]:22` = IPv6 any) |
+| **PROTO** | `tcp` / `tcp6` / `udp` / `udp6` — name carries the address family |
+| **STATE** | socket state from `/proc` (UDP has no LISTEN; bound sockets show as LISTEN). Only LISTEN shown by default; `--established` adds connected peers |
+| **PIDS** | every process holding an fd on the socket inode (`pid/comm`) |
+| **OWNER** | attribution: `container:name (image)` from cgroups, `unit:x.service` = systemd unit; `[socket-activated]` marks fd handed over by a `.socket` unit |
 
 - **`unit:x.socket [socket-activated]`** — the fd was opened by systemd on behalf of `x.service`. Killing `x.service` won't free the port; the fd lives in the socket unit.
 - **`container:<name> (<image>)`** — resolved via cgroup id; name/image need a working `docker`/`podman` CLI, short id always works.
